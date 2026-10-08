@@ -342,8 +342,31 @@ async function initFiltres() {
 $("fVille").onchange = load;
 $("fSpe").onchange = load;
 $("refresh").onclick = load;
+// ---------- Temps réel : les statistiques suivent les réservations (SSE) ----------
+let sourceStats = null, statsTimer = null, statsStopped = false, premierReady = true;
+function rechargerStatsBientot() {
+  // Le calcul des statistiques est coûteux : une seule relecture par salve d'événements (3 s)
+  if (statsStopped || statsTimer) return;
+  statsTimer = setTimeout(() => { statsTimer = null; if (!statsStopped) load(); }, 3000);
+}
+function connecterStats() {
+  if (statsStopped || sourceStats) return;
+  sourceStats = new EventSource("/creneaux/events");
+  // Reconnexion : relire l'état courant (la première lecture est faite au chargement de la page)
+  sourceStats.addEventListener("ready", () => { if (premierReady) premierReady = false; else load(); });
+  sourceStats.addEventListener("slot-updated", rechargerStatsBientot);
+  sourceStats.onerror = () => { if (!statsStopped) $("status").textContent = "Connexion au direct interrompue · reconnexion…"; };
+}
+window.addEventListener("pagehide", () => {
+  statsStopped = true;
+  if (sourceStats) sourceStats.close();
+  sourceStats = null;
+  clearTimeout(statsTimer);
+});
+
 initFiltres();
 load();
+connecterStats();
 </script>
 </body>
 </html>

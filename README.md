@@ -35,6 +35,40 @@ npm start                 # http://localhost:3001
 
 La double réservation d'un créneau est empêchée par un **index unique partiel** MongoDB (`praticien_id + debut`, hors rendez-vous annulés).
 
+## Temps réel (SSE) — TP « Synchroniser deux écrans »
+
+Quand un patient réserve ou annule, **les autres écrans se mettent à jour sans rechargement** : agendas des praticiens,
+« Mes rendez-vous », tableau de bord. Diffuseur : [`lib/sse.js`](lib/sse.js) ; client : fin de [`public/index.html`](public/index.html).
+
+Flux `GET /creneaux/events` (`text/event-stream`) :
+
+```
+retry: 3000
+
+id: 1
+event: ready
+data: {"action":"reload"}
+
+id: 2
+event: slot-updated
+data: {"slotId":"<praticien>_<début>","praticienId":"…","debut":"2026-10-12T08:20:00.000Z","status":"BOOKED","version":2}
+
+: keepalive
+```
+
+| Élément | Comportement |
+|---|---|
+| `ready` | envoyé à chaque (re)connexion → le client relit l'état courant (c'est ce qui rattrape une coupure : pas de replay) |
+| `slot-updated` | après chaque écriture réussie : réservation (`BOOKED`), annulation ou suppression (`AVAILABLE`), agenda modifié (`UPDATED`) |
+| Confidentialité | ni patient, ni identifiant de rendez-vous dans le flux ; seule la réponse du `POST` confirme une réservation |
+| Nettoyage | client retiré à la fermeture de la connexion (`req.on("close")`) ou en cas d'erreur d'écriture, sans affecter la réservation |
+| Keepalive | commentaire `: keepalive` toutes les 15 s |
+| Client | un seul `EventSource` ; `onerror` → « Connexion interrompue » **sans `close()`** (reconnexion automatique) ; fermeture et arrêt des minuteurs à `pagehide` (drapeau `stopped`) ; relecture de sécurité toutes les 30 s |
+| Conflit en direct | si le créneau ouvert dans la fenêtre de réservation est pris ailleurs, la fenêtre l'indique et désactive « Confirmer » |
+| Diagnostic | `GET /creneaux/events/count` → nombre de connexions ouvertes |
+
+Observer le flux : `curl.exe -N http://localhost:3001/creneaux/events`, puis réserver depuis le navigateur.
+
 ## Tests
 
 ```bash

@@ -140,6 +140,17 @@
   .patient-pop li .avatar { width: 34px; height: 34px; font-size: 12px; }
   .patient-pop li small { display: block; color: var(--muted); font-size: 12px; }
 
+  /* ---------- Temps réel (SSE) ---------- */
+  .live-pill { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; font-size: 12px; font-weight: 600; color: #fff; background: rgba(255, 255, 255, .08); border: 1px solid rgba(255, 255, 255, .12); white-space: nowrap; }
+  .live-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #c3cad5; }
+  .live-pill.connected .dot { background: #3ccf6e; box-shadow: 0 0 0 3px rgba(60, 207, 110, .25); }
+  .live-pill.connecting .dot { background: #fab219; }
+  .live-pill.interrupted { background: rgba(239, 123, 123, .18); border-color: rgba(239, 123, 123, .35); }
+  .live-pill.interrupted .dot { background: #ef7b7b; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  @media (max-width: 640px) { .live-pill #liveTxt { display: none; } }
+  .prat.live-update { box-shadow: 0 0 0 2px #fab219, var(--shadow); transition: box-shadow .3s; }
+
   /* ---------- Modale de réservation ---------- */
   .m-head { padding: 20px 20px 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
   .m-head h2 { margin: 0; font-size: 18px; letter-spacing: -.01em; }
@@ -207,6 +218,7 @@
       <a href="/dashboard.html"><svg class="icon"><use href="#i-chart"/></svg>Statistiques</a>
     </nav>
     <div class="right">
+      <span class="live-pill connecting" id="livePill" role="status" aria-live="polite" title="Mise à jour en direct des disponibilités (SSE)"><span class="dot"></span><span id="liveTxt">Connexion…</span></span>
       <button class="btn-ghost-dark" id="patientBtn" type="button" aria-haspopup="dialog">
         <span class="mini-av" id="patientAv"></span><span id="patientName">…</span><svg class="icon"><use href="#i-down"/></svg>
       </button>
@@ -578,6 +590,7 @@ async function confirmer() {
   if (!resa) return;
   const ok = $("mOk");
   ok.disabled = true; ok.textContent = "Réservation…";
+  resa.parMoi = true; // l'événement slot-updated de MA réservation ne doit pas afficher « pris par quelqu'un d'autre »
   const type = document.querySelector('input[name="type"]:checked')?.value ?? "cabinet";
   try {
     await api("/rendez-vous", { method: "POST", body: JSON.stringify({
@@ -602,6 +615,110 @@ async function confirmer() {
     loadAgenda(resa.a);
   }
 }
+
+// ---------- Temps réel : abonnement SSE aux disponibilités ----------
+// Contrat : « ready » → relire l'état courant ; « slot-updated » → relire l'agenda concerné.
+const SSE_URL = "/creneaux/events";
+const POLLING_MS = 30_000;   // filet de sécurité : relecture périodique, sans nouvelle connexion SSE
+const RECONNEXION_MS = 3_000; // seulement si le navigateur abandonne le flux (readyState CLOSED)
+
+let source = null;          // un seul EventSource pour la page
+let pollTimer = null;
+let reconnectTimer = null;
+let stopped = false;        // protection : plus aucune action après la fermeture de la page
+let persoTimer = null;
+
+function etatDirect(etat) {
+  const libelles = { connecting: "Connexion…", connected: "En direct", interrupted: "Connexion interrompue · reconnexion…" };
+  $("livePill").className = `live-pill ${etat}`;
+  $("liveTxt").textContent = libelles[etat];
+}
+
+// Mes rendez-vous : relus au plus une fois par seconde, même si plusieurs événements arrivent d'un coup
+function rafraichirPerso() {
+  if (stopped || persoTimer) return;
+  persoTimer = setTimeout(() => { persoTimer = null; if (!stopped && patient) { loadMesRdv(); loadCompteurs(); } }, 1000);
+}
+
+// Relecture complète : tous les agendas affichés + mes rendez-vous
+function relireTout() {
+  if (stopped) return;
+  refreshAgendas();
+  rafraichirPerso();
+}
+
+function surCreneauModifie(evt) {
+  if (stopped) return;
+  let d;
+  try { d = JSON.parse(evt.data); } catch { return relireTout(); }
+
+  // Le créneau ouvert dans ma fenêtre de réservation vient d'être pris par quelqu'un d'autre
+  if (resa && !resa.parMoi && d.status === "BOOKED" && d.praticienId === String(resa.a.p._id)
+      && new Date(d.debut).getTime() === new Date(resa.slot).getTime()) {
+    const err = $("mErr"), ok = $("mOk");
+    if (err && ok) {
+      err.textContent = "Ce créneau vient d'être réservé par quelqu'un d'autre. Choisissez un autre horaire.";
+      err.classList.add("show");
+      ok.disabled = true;
+    }
+  }
+
+  // Relire uniquement l'agenda du praticien concerné, s'il est affiché
+  const a = agendas.get(d.praticienId);
+  if (a) {
+    loadAgenda(a);
+    const carte = a.el.closest(".prat");
+    carte.classList.add("live-update");
+    setTimeout(() => carte.classList.remove("live-update"), 1500);
+  }
+  rafraichirPerso();
+}
+
+function connecterDirect() {
+  if (stopped || source) return; // un seul flux
+  etatDirect("connecting");
+  source = new EventSource(SSE_URL);
+
+  source.addEventListener("ready", () => {
+    if (stopped) return;
+    etatDirect("connected");
+    relireTout(); // rattrape ce qui a changé pendant une éventuelle coupure (pas de replay côté serveur)
+  });
+
+  source.addEventListener("slot-updated", surCreneauModifie);
+
+  // Erreur : on l'affiche SANS appeler close() → EventSource se reconnecte tout seul
+  source.onerror = () => {
+    if (stopped) return;
+    etatDirect("interrupted");
+    if (source.readyState === EventSource.CLOSED && !reconnectTimer) {
+      reconnectTimer = setTimeout(() => { reconnectTimer = null; source = null; connecterDirect(); }, RECONNEXION_MS);
+    }
+  };
+}
+
+function arreterDirect() {
+  stopped = true;
+  if (source) source.close();
+  source = null;
+  clearInterval(pollTimer);
+  clearTimeout(reconnectTimer);
+  clearTimeout(persoTimer);
+}
+
+connecterDirect();
+pollTimer = setInterval(relireTout, POLLING_MS);
+window.addEventListener("offline", () => { if (!stopped) etatDirect("interrupted"); });
+window.addEventListener("online", relireTout);
+// Rechargement ou fermeture de l'onglet : libérer le flux et les minuteurs
+window.addEventListener("pagehide", arreterDirect);
+// Retour sur la page depuis le cache avant/arrière du navigateur : reprendre l'abonnement
+window.addEventListener("pageshow", (e) => {
+  if (!e.persisted) return;
+  stopped = false;
+  connecterDirect();
+  pollTimer = setInterval(relireTout, POLLING_MS);
+});
 
 initPatient().then(initPraticiens).catch((e) => { $("resCount").textContent = "Impossible de contacter l'API : " + e.message; });
 </script>

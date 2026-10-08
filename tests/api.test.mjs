@@ -35,7 +35,7 @@ before(async () => {
     const debut = jourISO(new Date(Date.now() + 15 * JOUR));
     const d = await api("GET", `/praticiens/${p._id}/disponibilites?debut=${debut}&jours=7`);
     const libres = d.body.jours.flatMap((j) => j.creneaux);
-    if (libres.length >= 3) { cabinet = p; creneaux = libres; break; }
+    if (libres.length >= 6) { cabinet = p; creneaux = libres; break; }
   }
   assert.ok(cabinet, "aucun praticien avec des créneaux libres trouvé");
   for (let i = 0; i < 12; i++) await creerPatient(i);
@@ -167,6 +167,127 @@ describe("Rendez-vous", () => {
     assert.ok(statuts.every((s) => s === 201 || s === 409));
     const gagnant = resultats.find((r) => r.status === 201);
     await api("DELETE", `/rendez-vous/${gagnant.body._id}`);
+  });
+});
+
+// ---------- Client SSE minimal pour les tests (fetch + lecture du flux) ----------
+async function ouvrirFlux() {
+  const ctrl = new AbortController();
+  const res = await fetch(BASE + "/creneaux/events", { signal: ctrl.signal });
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  const evenements = [];
+  const attentes = new Set();
+  let tampon = "";
+  const verifier = () => { for (const a of attentes) { const e = evenements.find(a.pred); if (e) { attentes.delete(a); clearTimeout(a.t); a.ok(e); } } };
+  (async () => {
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        tampon += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = tampon.indexOf("\n\n")) >= 0) {
+          const bloc = tampon.slice(0, i);
+          tampon = tampon.slice(i + 2);
+          const ev = { brut: bloc };
+          for (const ligne of bloc.split("\n")) {
+            if (ligne.startsWith(":")) ev.commentaire = ligne.slice(1).trim();
+            else if (ligne.startsWith("event:")) ev.nom = ligne.slice(6).trim();
+            else if (ligne.startsWith("data:")) ev.data = JSON.parse(ligne.slice(5).trim());
+            else if (ligne.startsWith("id:")) ev.id = Number(ligne.slice(3).trim());
+            else if (ligne.startsWith("retry:")) ev.retry = Number(ligne.slice(6).trim());
+          }
+          evenements.push(ev);
+          verifier();
+        }
+      }
+    } catch { /* flux fermé par le test */ }
+  })();
+  return {
+    res,
+    evenements,
+    attendre(pred, ms = 5000) {
+      return new Promise((ok, ko) => {
+        const a = { pred, ok };
+        a.t = setTimeout(() => { attentes.delete(a); ko(new Error("événement attendu non reçu")); }, ms);
+        attentes.add(a);
+        verifier();
+      });
+    },
+    fermer: () => ctrl.abort(),
+  };
+}
+const attendreConnexions = async (n) => {
+  for (let i = 0; i < 50; i++) {
+    if ((await api("GET", "/creneaux/events/count")).body.connexions === n) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+};
+
+describe("Temps réel (SSE)", () => {
+  test("flux text/event-stream : retry puis ready {action: reload}", async () => {
+    const flux = await ouvrirFlux();
+    try {
+      assert.equal(flux.res.status, 200);
+      assert.match(flux.res.headers.get("content-type"), /^text\/event-stream/);
+      const ready = await flux.attendre((e) => e.nom === "ready");
+      assert.deepEqual(ready.data, { action: "reload" });
+      assert.ok(Number.isInteger(ready.id), "chaque événement a un identifiant");
+      assert.ok(flux.evenements.some((e) => e.retry > 0), "délai de reconnexion conseillé au navigateur");
+    } finally { flux.fermer(); }
+  });
+
+  test("réservation, annulation et suppression diffusées sans données personnelles", async () => {
+    const patientId = patientsTest[0];
+    const slot = creneaux[3];
+    const memeCreneau = (status) => (e) => e.nom === "slot-updated" && e.data.praticienId === String(cabinet._id)
+      && new Date(e.data.debut).getTime() === new Date(slot).getTime() && e.data.status === status;
+    const flux = await ouvrirFlux();
+    try {
+      await flux.attendre((e) => e.nom === "ready");
+      const cree = await api("POST", "/rendez-vous", { praticien_id: cabinet._id, patient_id: patientId, debut: slot });
+      assert.equal(cree.status, 201);
+
+      const pris = await flux.attendre(memeCreneau("BOOKED"));
+      assert.deepEqual(Object.keys(pris.data).sort(), ["debut", "praticienId", "slotId", "status", "version"]);
+      assert.ok(!pris.brut.includes(patientId), "l'identifiant du patient n'est pas diffusé");
+      assert.ok(!pris.brut.includes(cree.body._id), "l'identifiant du rendez-vous n'est pas diffusé");
+
+      assert.equal((await api("PATCH", `/rendez-vous/${cree.body._id}`, { statut: "annule" })).status, 200);
+      const libere = await flux.attendre(memeCreneau("AVAILABLE"));
+      assert.ok(libere.data.version > pris.data.version, "les versions sont croissantes");
+
+      flux.evenements.length = 0;
+      assert.equal((await api("DELETE", `/rendez-vous/${cree.body._id}`)).status, 204);
+      await flux.attendre(memeCreneau("AVAILABLE"));
+    } finally { flux.fermer(); }
+  });
+
+  test("plusieurs abonnés reçoivent l'événement ; les connexions fermées sont retirées", async () => {
+    const avant = (await api("GET", "/creneaux/events/count")).body.connexions;
+    const a = await ouvrirFlux();
+    const b = await ouvrirFlux();
+    try {
+      await Promise.all([a.attendre((e) => e.nom === "ready"), b.attendre((e) => e.nom === "ready")]);
+      assert.equal((await api("GET", "/creneaux/events/count")).body.connexions, avant + 2);
+      const cree = await api("POST", "/rendez-vous", { praticien_id: cabinet._id, patient_id: patientsTest[1], debut: creneaux[4] });
+      assert.equal(cree.status, 201);
+      const pred = (e) => e.nom === "slot-updated" && e.data.status === "BOOKED" && new Date(e.data.debut).getTime() === new Date(creneaux[4]).getTime();
+      await Promise.all([a.attendre(pred), b.attendre(pred)]);
+      await api("DELETE", `/rendez-vous/${cree.body._id}`);
+    } finally { a.fermer(); b.fermer(); }
+    assert.ok(await attendreConnexions(avant), "les deux connexions fermées sont retirées côté serveur");
+  });
+
+  test("un abonné parti n'empêche pas de réserver", async () => {
+    const flux = await ouvrirFlux();
+    await flux.attendre((e) => e.nom === "ready");
+    flux.fermer();
+    const cree = await api("POST", "/rendez-vous", { praticien_id: cabinet._id, patient_id: patientsTest[2], debut: creneaux[5] });
+    assert.equal(cree.status, 201);
+    await api("DELETE", `/rendez-vous/${cree.body._id}`);
   });
 });
 

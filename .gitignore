@@ -5,3 +5,5 @@ k6/rapport.html
 perf-report.md
 *.log
 k6/seuils-depasses.txt
+k6/rupture-resume.json
+k6/rupture-*.html

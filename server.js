@@ -1,6 +1,7 @@
 import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
 import { creneauxDuJour, estUnCreneau, finDuCreneau, formatJour, parseJour } from "./lib/creneaux.js";
+import { creerDiffuseur } from "./lib/sse.js";
 
 const { MONGODB_URI, DB_NAME = "doctolib", PORT = 3001, LATENCE_SIMULEE_MS = "0" } = process.env;
 
@@ -37,6 +38,12 @@ await rechargerPraticiens();
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
+
+// Flux temps réel des disponibilités (SSE) : les autres écrans se mettent à jour sans rechargement
+const sse = creerDiffuseur();
+const statutCreneau = (statut) => (STATUTS_ACTIFS.includes(statut) ? "BOOKED" : "AVAILABLE");
+app.get("/creneaux/events", (req, res) => sse.abonner(req, res));
+app.get("/creneaux/events/count", (req, res) => res.json({ connexions: sse.connexions() }));
 
 // Latence artificielle sur les routes de l'API (sert à vérifier que la CI détecte bien une lenteur)
 const latence = parseInt(LATENCE_SIMULEE_MS) || 0;
@@ -117,11 +124,19 @@ const RESSOURCES = {
     },
     tri: { nom: 1, prenom: 1 },
     // Suppression d'un compte patient : ses rendez-vous sont supprimés aussi
-    async apresSuppression(_id) { await rendezVous.deleteMany({ patient_id: _id }); },
+    async apresSuppression(_id) {
+      const liberes = await rendezVous.find({ patient_id: _id, statut: { $in: STATUTS_ACTIFS }, debut: { $gt: new Date() } }, { projection: { praticien_id: 1, debut: 1 } }).toArray();
+      await rendezVous.deleteMany({ patient_id: _id });
+      for (const r of liberes) sse.creneauModifie({ praticienId: r.praticien_id, debut: r.debut, status: "AVAILABLE" });
+    },
   },
 };
 RESSOURCES.praticiens.apresSuppression = async (_id) => { await rendezVous.deleteMany({ praticien_id: _id }); };
-RESSOURCES.praticiens.apresEcriture = rechargerPraticiens;
+// Agenda d'un praticien créé, modifié ou supprimé : ses créneaux peuvent avoir changé
+RESSOURCES.praticiens.apresEcriture = async (_id) => {
+  await rechargerPraticiens();
+  if (_id) sse.creneauModifie({ praticienId: _id, status: "UPDATED" });
+};
 
 // ---------- CRUD générique : praticiens et patients ----------
 
@@ -150,7 +165,7 @@ for (const [nom, r] of Object.entries(RESSOURCES)) {
     r.valider(doc);
     doc.cree_le = new Date();
     const { insertedId } = await r.collection.insertOne(doc);
-    await r.apresEcriture?.();
+    await r.apresEcriture?.(insertedId);
     res.status(201).json({ _id: insertedId, ...doc });
   }));
 
@@ -163,7 +178,7 @@ for (const [nom, r] of Object.entries(RESSOURCES)) {
     const avant = await r.collection.findOne({ _id }, { projection: { cree_le: 1 } });
     if (!avant) throw new HttpError(404, "introuvable");
     const result = await r.collection.findOneAndReplace({ _id }, { ...doc, cree_le: avant.cree_le }, { returnDocument: "after" });
-    await r.apresEcriture?.();
+    await r.apresEcriture?.(_id);
     res.json(result);
   }));
 
@@ -174,7 +189,7 @@ for (const [nom, r] of Object.entries(RESSOURCES)) {
     r.valider(maj);
     const result = await r.collection.findOneAndUpdate({ _id }, { $set: maj }, { returnDocument: "after" });
     if (!result) throw new HttpError(404, "introuvable");
-    await r.apresEcriture?.();
+    await r.apresEcriture?.(_id);
     res.json(result);
   }));
 
@@ -183,7 +198,7 @@ for (const [nom, r] of Object.entries(RESSOURCES)) {
     const { deletedCount } = await r.collection.deleteOne({ _id });
     if (!deletedCount) throw new HttpError(404, "introuvable");
     await r.apresSuppression(_id);
-    await r.apresEcriture?.();
+    await r.apresEcriture?.(_id);
     res.status(204).end();
   }));
 }
@@ -274,11 +289,13 @@ app.post("/rendez-vous", route(async (req, res) => {
   const doc = { praticien_id: pid, patient_id: patId, debut, fin, motif: motif || praticien.motifs?.[0] || "Consultation", type, statut: "confirme", cree_le: new Date() };
   try {
     const { insertedId } = await rendezVous.insertOne(doc);
+    // La confirmation personnelle est la réponse de ce POST ; le flux n'annonce qu'un créneau pris
     res.status(201).json({ _id: insertedId, ...doc });
   } catch (e) {
     if (e.code === 11000) throw new HttpError(409, "ce créneau vient d'être réservé");
     throw e;
   }
+  sse.creneauModifie({ praticienId: pid, debut, status: "BOOKED" }); // après l'écriture réussie
 }));
 
 // PATCH /rendez-vous/:id { statut?, motif? }  (ex. { "statut": "annule" })
@@ -291,6 +308,7 @@ app.patch("/rendez-vous/:id", route(async (req, res) => {
     const result = await rendezVous.findOneAndUpdate({ _id }, { $set: { ...maj, modifie_le: new Date() } }, { returnDocument: "after" });
     if (!result) throw new HttpError(404, "rendez-vous introuvable");
     res.json(result);
+    if (maj.statut) sse.creneauModifie({ praticienId: result.praticien_id, debut: result.debut, status: statutCreneau(result.statut) });
   } catch (e) {
     if (e.code === 11000) throw new HttpError(409, "le créneau a été repris entre-temps");
     throw e;
@@ -298,9 +316,10 @@ app.patch("/rendez-vous/:id", route(async (req, res) => {
 }));
 
 app.delete("/rendez-vous/:id", route(async (req, res) => {
-  const { deletedCount } = await rendezVous.deleteOne({ _id: oid(req.params.id) });
-  if (!deletedCount) throw new HttpError(404, "rendez-vous introuvable");
+  const supprime = await rendezVous.findOneAndDelete({ _id: oid(req.params.id) });
+  if (!supprime) throw new HttpError(404, "rendez-vous introuvable");
   res.status(204).end();
+  sse.creneauModifie({ praticienId: supprime.praticien_id, debut: supprime.debut, status: "AVAILABLE" });
 }));
 
 // ---------- Statistiques ----------

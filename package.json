@@ -10,7 +10,8 @@
     "dev": "node --env-file-if-exists=.env --watch server.js",
     "test": "node --test --test-reporter=spec \"tests/**/*.test.mjs\"",
     "perf": "k6 run --summary-export k6/summary.json k6/load-test.js",
-    "perf:rapport": "node scripts/perf-report.mjs k6/summary.json"
+    "perf:rapport": "node scripts/perf-report.mjs k6/summary.json",
+    "perf:rupture": "k6 run k6/stress-test.js"
   },
   "dependencies": {
     "express": "^5.1.0",
