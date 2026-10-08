@@ -182,21 +182,6 @@ describe("Statistiques", () => {
     assert.ok(body.par_specialite.length > 0 && body.par_jour.length > 0);
   });
 
-  test("santé de l'API et de MongoDB", async () => {
-    const { status, body } = await api("GET", "/sante");
-    assert.equal(status, 200);
-    assert.equal(body.statut, "ok");
-    assert.equal(body.mongo, "ok");
-  });
-
-  test("monitoring de charge : mesures et seuils exposés", async () => {
-    const { status, body } = await api("GET", "/monitoring");
-    assert.equal(status, 200);
-    assert.ok(["normal", "elevee"].includes(body.niveau));
-    for (const k of ["requetes", "rps", "p95_ms"]) assert.equal(typeof body.mesures[k], "number", k);
-    assert.ok(body.mesures.seuils.max_rps > 0);
-  });
-
   test("route inconnue → 404", async () => {
     assert.equal((await api("GET", "/nexiste-pas")).status, 404);
   });

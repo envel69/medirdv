@@ -1,9 +1,0 @@
-node_modules
-.env
-.git
-.github
-k6
-tests
-scripts
-*.md
-*.log
