@@ -1,0 +1,51 @@
+{
+  "genere_le": "2026-10-08T12:29:02.040Z",
+  "repo": "envel69/medirdv",
+  "victoires": 3,
+  "defaites": 0,
+  "ignorees": 0,
+  "taux_reussite": 1,
+  "serie": {
+    "type": "W",
+    "longueur": 3
+  },
+  "duree_moyenne_s": 116,
+  "historique": [
+    {
+      "id": 37776769354,
+      "numero": 3,
+      "resultat": "W",
+      "conclusion": "success",
+      "evenement": "push",
+      "sha": "450832b",
+      "titre": "exécution en cours",
+      "url": "https://github.com/envel69/medirdv/actions/runs/37776769354",
+      "date": "2026-10-08T12:29:02.040Z",
+      "duree_s": 0
+    },
+    {
+      "id": 37775626372,
+      "numero": 2,
+      "resultat": "W",
+      "conclusion": "success",
+      "evenement": "push",
+      "sha": "ab2f91b",
+      "titre": "CI/CD : livraison Docker, baromètre W/L, déclenchement sur charge",
+      "url": "https://github.com/envel69/medirdv/actions/runs/37775626372",
+      "date": "2026-10-08T12:15:45Z",
+      "duree_s": 221
+    },
+    {
+      "id": 37764636896,
+      "numero": 1,
+      "resultat": "W",
+      "conclusion": "success",
+      "evenement": "push",
+      "sha": "2160bb0",
+      "titre": "MédiRDV : API de prise de rendez-vous, front, tests et CI",
+      "url": "https://github.com/envel69/medirdv/actions/runs/37764636896",
+      "date": "2026-10-08T10:36:58Z",
+      "duree_s": 127
+    }
+  ]
+}
