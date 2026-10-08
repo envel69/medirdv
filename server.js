@@ -1,8 +1,15 @@
 import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
+import os from "node:os";
 import { creneauxDuJour, estUnCreneau, finDuCreneau, formatJour, parseJour } from "./lib/creneaux.js";
+import { creerMoniteurCharge } from "./lib/charge.js";
+import { calculerBarometre, chargerExecutions, declencherWorkflow } from "./lib/github.js";
 
-const { MONGODB_URI, DB_NAME = "doctolib", PORT = 3001, LATENCE_SIMULEE_MS = "0" } = process.env;
+const {
+  MONGODB_URI, DB_NAME = "doctolib", PORT = 3001, LATENCE_SIMULEE_MS = "0",
+  GITHUB_TOKEN, GITHUB_REPO = "envel69/medirdv",
+  CHARGE_SURVEILLANCE = "on", CHARGE_MAX_RPS = "40", CHARGE_MAX_P95_MS = "1000", CHARGE_MIN_REQUETES = "100", CHARGE_REPIT_MIN = "30",
+} = process.env;
 
 const client = new MongoClient(MONGODB_URI);
 await client.connect();
@@ -37,6 +44,30 @@ await rechargerPraticiens();
 const app = express();
 app.use(express.json());
 app.use(express.static("public"));
+
+// Surveillance de charge : si l'API est trop sollicitée ou trop lente, on lance le workflow GitHub Actions
+// (alerte + tests de lenteur). Désactivée en CI (CHARGE_SURVEILLANCE=off).
+const ROUTES_TECHNIQUES = /^\/(sante|monitoring|ci)(\/|$)/;
+const moniteur = creerMoniteurCharge({
+  maxRps: Number(CHARGE_MAX_RPS),
+  maxP95Ms: Number(CHARGE_MAX_P95_MS),
+  minRequetes: Number(CHARGE_MIN_REQUETES),
+  repitMs: Number(CHARGE_REPIT_MIN) * 60000,
+  ignorer: (req) => ROUTES_TECHNIQUES.test(req.path),
+  onDepassement: ({ raisons, mesures, date }) => declencherWorkflow({
+    token: GITHUB_TOKEN,
+    repo: GITHUB_REPO,
+    inputs: {
+      declencheur: "charge",
+      details_charge: JSON.stringify({ date, hote: os.hostname(), raisons, rps: +mesures.rps.toFixed(1), p95_ms: Math.round(mesures.p95_ms), requetes: mesures.requetes, fenetre_s: mesures.fenetre_s }),
+    },
+  }),
+});
+if (CHARGE_SURVEILLANCE !== "off") {
+  app.use(moniteur.middleware);
+  moniteur.demarrer();
+  console.log(`Surveillance de charge active (> ${CHARGE_MAX_RPS} req/s ou p95 > ${CHARGE_MAX_P95_MS} ms)${GITHUB_TOKEN ? "" : " — GITHUB_TOKEN absent : pas de déclenchement GitHub"}`);
+}
 
 // Latence artificielle sur les routes de l'API (sert à vérifier que la CI détecte bien une lenteur)
 const latence = parseInt(LATENCE_SIMULEE_MS) || 0;
@@ -403,6 +434,28 @@ app.get("/stats", route(async (req, res) => {
         rendez_vous: c.honore + c.confirme, taux_annulation: (c.annule) / (c.honore + c.confirme + c.absent + c.annule || 1) };
     }).sort((a, b) => b.rendez_vous - a.rendez_vous).slice(0, 10),
   });
+}));
+
+// ---------- Santé, monitoring, baromètre CI/CD ----------
+
+app.get("/sante", route(async (req, res) => {
+  await db.command({ ping: 1 });
+  res.json({ statut: "ok", mongo: "ok", uptime_s: Math.round(process.uptime()), version: process.env.APP_VERSION ?? "dev" });
+}));
+
+app.get("/monitoring", (req, res) => {
+  res.json({ surveillance: CHARGE_SURVEILLANCE !== "off", github: { repo: GITHUB_REPO, token: Boolean(GITHUB_TOKEN) }, ...moniteur.etat() });
+});
+
+// Baromètre W/L des exécutions du pipeline sur main (mis en cache 60 s : l'API GitHub est limitée sans token)
+const cacheBarometre = { data: null, le: 0 };
+app.get("/ci/barometre", route(async (req, res) => {
+  if (!cacheBarometre.data || Date.now() - cacheBarometre.le > 60000) {
+    const runs = await chargerExecutions({ token: GITHUB_TOKEN, repo: GITHUB_REPO });
+    cacheBarometre.data = { repo: GITHUB_REPO, ...calculerBarometre(runs) };
+    cacheBarometre.le = Date.now();
+  }
+  res.json(cacheBarometre.data);
 }));
 
 // ---------- Erreurs ----------

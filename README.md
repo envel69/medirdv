@@ -1,6 +1,7 @@
 # MédiRDV
 
-[![CI](https://github.com/envel69/medirdv/actions/workflows/ci.yml/badge.svg)](https://github.com/envel69/medirdv/actions/workflows/ci.yml)
+[![CI/CD](https://github.com/envel69/medirdv/actions/workflows/ci.yml/badge.svg)](https://github.com/envel69/medirdv/actions/workflows/ci.yml)
+[![Baromètre W/L](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/envel69/medirdv/barometre/barometre.json)](https://github.com/envel69/medirdv/actions/workflows/ci.yml)
 
 Clone simplifié de Doctolib : recherche de praticiens, disponibilités en temps réel, prise et annulation de rendez-vous, tableau de bord statistique.
 Stack : **Node.js / Express 5 / MongoDB**, front en HTML/CSS/JS sans framework, tests de charge **k6**.
@@ -43,9 +44,9 @@ npm run perf      # test de charge k6 (seuils de lenteur)
 npm run perf:rapport
 ```
 
-## Intégration continue (GitHub Actions)
+## CI/CD (GitHub Actions)
 
-Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) s'exécute à chaque push sur `main`, sur chaque pull request, **tous les jours à 5 h UTC** et à la demande :
+Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) s'exécute à chaque push sur `main`, sur chaque pull request, **tous les jours à 5 h UTC**, à la demande, et **automatiquement quand l'API détecte une charge trop haute** :
 
 1. **Tests de l'API** : MongoDB jetable dans le runner, génération des données, tests d'intégration.
 2. **Tests de lenteur (k6)** : test de charge avec seuils (p95 par route, taux d'erreur, course au créneau).
@@ -53,7 +54,24 @@ Le workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) s'exécute à
    - **Seuil dépassé → une issue GitHub `lenteur` est ouverte** (ou commentée si elle existe déjà).
    - **Seuils de nouveau respectés sur `main` → l'issue est fermée automatiquement.**
 
-Pour vérifier l'alerte : *Actions → CI → Run workflow* avec `latence_simulee_ms = 600`.
+3. **Livraison (CD)** — uniquement après un push vert sur `main` : construction de l'image Docker, test de fumée (`/sante`), publication sur `ghcr.io/envel69/medirdv` (`latest` + SHA du commit).
+4. **Baromètre W/L** — compte les réussites (W) et échecs (L) des exécutions sur `main`, publie le badge ci-dessus (branche `barometre`) et un résumé dans l'exécution. Aussi visible dans le tableau de bord (`/dashboard.html`).
+5. **Alerte charge élevée** — quand le workflow est lancé par l'API, ouvre (ou commente) une issue `charge` avec les mesures.
+
+Pour vérifier l'alerte de lenteur : *Actions → CI/CD → Run workflow* avec `latence_simulee_ms = 600`.
+
+```bash
+docker pull ghcr.io/envel69/medirdv:latest
+docker run -p 3001:3001 -e MONGODB_URI="mongodb+srv://..." ghcr.io/envel69/medirdv:latest
+```
+
+## Surveillance de charge → GitHub Actions
+
+L'API mesure en continu son débit et sa latence p95 sur une fenêtre glissante de 60 s (`GET /monitoring`).
+Si `débit > CHARGE_MAX_RPS` ou `p95 > CHARGE_MAX_P95_MS` (avec au moins `CHARGE_MIN_REQUETES` requêtes), elle **lance le workflow** via l'API GitHub
+(`declencheur = charge`) : issue `charge` + tests + tests de lenteur. Un délai de `CHARGE_REPIT_MIN` minutes évite de relancer en boucle.
+
+Configuration dans `.env` (voir `.env.example`) : `GITHUB_TOKEN` = token GitHub *fine-grained* limité à ce dépôt avec la permission **Actions : Read and write**.
 
 Seuils (dans `k6/load-test.js`) :
 

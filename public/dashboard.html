@@ -79,6 +79,42 @@
   #tooltip .r i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
   #tooltip .r b { font-size: 12px; color: var(--text-primary); font-variant-numeric: tabular-nums; text-transform: none; }
   .error { padding: 16px; color: var(--critical); margin-bottom: 12px; }
+
+  /* ---------- CI/CD & production ---------- */
+  .section-title { display: flex; align-items: baseline; gap: 10px; margin: 8px 0 12px; flex-wrap: wrap; }
+  .section-title h2 { font-size: 17px; margin: 0; letter-spacing: -.01em; }
+  .ops { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(440px, 100%), 1fr)); gap: 12px; margin-bottom: 20px; }
+  .ops > * { min-width: 0; }
+  .baro { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 20px; align-items: center; }
+  @media (max-width: 520px) { .baro { grid-template-columns: 1fr; justify-items: center; } }
+  .gauge { width: 200px; display: block; }
+  .gauge-label { text-align: center; margin-top: 2px; font-size: 13px; font-weight: 600; }
+  .wl { display: flex; gap: 22px; align-items: flex-end; }
+  .wl .n { font-size: 40px; font-weight: 800; line-height: 1; letter-spacing: -.03em; }
+  .wl .l { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 5px; margin-top: 4px; }
+  .dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; margin: 14px 0 0; font-size: 13px; }
+  .kv dt { color: var(--text-secondary); }
+  .kv dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .runs { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 16px; }
+  .run { width: 18px; height: 18px; border-radius: 4px; display: grid; place-items: center; color: #fff; font-size: 11px; font-weight: 800; text-decoration: none; line-height: 1; }
+  .run.W { background: #0ca30c; } .run.L { background: #d03b3b; } .run.N { background: var(--surface-3); color: var(--muted); }
+  .run:hover { outline: 2px solid var(--text-primary); outline-offset: 1px; }
+  .runs-legend { display: flex; gap: 14px; font-size: 12px; color: var(--text-secondary); margin-top: 8px; flex-wrap: wrap; }
+  .etat { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .etat.normal { background: var(--good-wash); color: var(--good); }
+  .etat.elevee { background: var(--critical-wash); color: var(--critical); }
+  .etat.off { background: var(--surface-3); color: var(--text-secondary); }
+  .jauges { display: grid; gap: 14px; margin-top: 4px; }
+  .jauge .top { display: flex; justify-content: space-between; font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; gap: 8px; }
+  .jauge .top b { color: var(--text-primary); font-variant-numeric: tabular-nums; }
+  .jauge .track { height: 12px; border-radius: 6px; background: var(--accent-wash); overflow: hidden; }
+  .jauge .fill { height: 100%; border-radius: 6px; background: var(--series-1); transition: width .4s; }
+  .jauge .fill.over { background: #d03b3b; }
+  .trigger { margin-top: 16px; padding: 12px; border-radius: 10px; background: var(--surface-2); font-size: 13px; display: grid; gap: 4px; }
+  .ops .head2 { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+  .ops a.lnk { font-size: 13px; color: var(--accent-strong); text-decoration: none; font-weight: 500; }
+  .ops a.lnk:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -106,6 +142,25 @@
   <div id="error"></div>
   <section class="tiles" id="tiles"></section>
 
+  <div class="section-title"><h2>Pipeline CI/CD &amp; production</h2><span class="muted" style="font-size:13px">GitHub Actions · surveillance de l'API</span></div>
+  <section class="ops">
+    <div class="card panel">
+      <div class="head2">
+        <div><h2>Baromètre W/L</h2><p class="desc">Exécutions du pipeline sur main · W = réussite, L = échec</p></div>
+        <a class="lnk" id="ghLink" href="#" target="_blank" rel="noopener">Voir sur GitHub →</a>
+      </div>
+      <div id="baro"><div class="muted">Chargement…</div></div>
+    </div>
+    <div class="card panel">
+      <div class="head2">
+        <div><h2>Surveillance de charge</h2><p class="desc">Fenêtre glissante · au-delà des seuils, le workflow GitHub Actions est lancé</p></div>
+        <span class="etat normal" id="etatCharge">—</span>
+      </div>
+      <div id="charge"><div class="muted">Chargement…</div></div>
+    </div>
+  </section>
+
+  <div class="section-title"><h2>Activité de la plateforme</h2></div>
   <section class="grid">
     <div class="card panel wide">
       <div class="panel-head">
@@ -342,8 +397,99 @@ async function initFiltres() {
 $("fVille").onchange = load;
 $("fSpe").onchange = load;
 $("refresh").onclick = load;
+// ---------- Baromètre W/L ----------
+const fmtDateHeure = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+const minutes = (s) => (s == null ? "—" : (Math.round((s / 60) * 10) / 10).toLocaleString("fr-FR") + " min");
+
+// Jauge en demi-cercle : zones rouge < 50 %, jaune < 75 %, vert clair < 90 %, vert ≥ 90 %
+function gauge(taux) {
+  const pt = (f, r = 80) => { const t = Math.PI * (1 - f); return [100 + r * Math.cos(t), 100 - r * Math.sin(t)]; };
+  const arc = (a, b, color) => { const [x1, y1] = pt(a), [x2, y2] = pt(b); return `<path d="M${x1} ${y1} A80 80 0 0 1 ${x2} ${y2}" stroke="${color}" stroke-width="16" fill="none"/>`; };
+  const zones = [[0, 0.5, "#d03b3b"], [0.5, 0.75, "#fab219"], [0.75, 0.9, "#7cc96f"], [0.9, 1, "#0ca30c"]];
+  const [nx, ny] = pt(taux ?? 0, 60);
+  const pctTxt = taux == null ? "—" : Math.round(taux * 100) + " %";
+  return `<svg class="gauge" viewBox="0 0 200 134" role="img" aria-label="Taux de réussite ${pctTxt}">
+    ${zones.map(([a, b, c], i) => arc(a + (i ? 0.006 : 0), b - (i < 3 ? 0.006 : 0), c)).join("")}
+    ${taux == null ? "" : `<line x1="100" y1="100" x2="${nx}" y2="${ny}" stroke="var(--text-primary)" stroke-width="3" stroke-linecap="round"/><circle cx="100" cy="100" r="6" fill="var(--text-primary)"/>`}
+    <text x="100" y="131" text-anchor="middle" font-size="18" font-weight="800" fill="var(--text-primary)">${pctTxt}</text>
+  </svg>`;
+}
+function meteo(taux) {
+  if (taux == null) return ["Pas encore de données", "var(--text-secondary)"];
+  if (taux >= 0.9) return ["☀️ Stable", "var(--good)"];
+  if (taux >= 0.75) return ["⛅ Plutôt stable", "var(--text-secondary)"];
+  if (taux >= 0.5) return ["🌧️ Variable", "var(--text-secondary)"];
+  return ["⛈️ Instable", "var(--critical)"];
+}
+async function loadBarometre() {
+  const el = $("baro");
+  try {
+    const r = await fetch("/ci/barometre");
+    const b = await r.json();
+    if (!r.ok) throw new Error(b.erreur || r.status);
+    $("ghLink").href = `https://github.com/${b.repo}/actions`;
+    const [lib, col] = meteo(b.taux_reussite);
+    const runs = b.historique.slice(0, 30).reverse();
+    const serie = b.serie ? `${b.serie.longueur} ${b.serie.type === "W" ? "réussite" : "échec"}${b.serie.longueur > 1 ? "s" : ""} d'affilée` : "—";
+    el.innerHTML = `<div class="baro">
+        <div>${gauge(b.taux_reussite)}<div class="gauge-label" style="color:${col}">${lib}</div></div>
+        <div>
+          <div class="wl">
+            <div><div class="n">${b.victoires}</div><div class="l"><span class="dot" style="background:#0ca30c"></span>W · réussites</div></div>
+            <div><div class="n">${b.defaites}</div><div class="l"><span class="dot" style="background:#d03b3b"></span>L · échecs</div></div>
+          </div>
+          <dl class="kv">
+            <dt>Série en cours</dt><dd>${serie}</dd>
+            <dt>Durée moyenne</dt><dd>${minutes(b.duree_moyenne_s)}</dd>
+            <dt>Dernière exécution</dt><dd>${b.historique[0] ? fmtDateHeure.format(new Date(b.historique[0].date)) : "—"}</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="runs">${runs.map((h) => `<a class="run ${h.resultat === "-" ? "N" : h.resultat}" href="${h.url}" target="_blank" rel="noopener" data-i="${h.id}" aria-label="Exécution ${h.numero} : ${h.conclusion}">${h.resultat === "W" ? "✓" : h.resultat === "L" ? "✗" : "–"}</a>`).join("")}</div>
+      <div class="runs-legend"><span>✓ réussite</span><span>✗ échec</span><span>– annulée</span><span class="muted">de la plus ancienne à la plus récente</span></div>`;
+    el.querySelectorAll(".run").forEach((a) => {
+      const h = runs.find((x) => String(x.id) === a.dataset.i);
+      bindTip(a, `<b>Exécution #${h.numero}</b>${ligne("Résultat", h.resultat === "W" ? "✓ réussite" : h.resultat === "L" ? "✗ échec" : esc(h.conclusion))}${ligne("Déclencheur", esc(h.evenement))}${ligne("Commit", esc(h.sha ?? "—"))}${ligne("Date", fmtDateHeure.format(new Date(h.date)))}${ligne("Durée", minutes(h.duree_s))}<div class="r"><span>${esc(h.titre ?? "")}</span></div>`);
+    });
+  } catch (e) {
+    el.innerHTML = `<div class="muted">Baromètre indisponible (${esc(e.message)}).</div>`;
+  }
+}
+
+// ---------- Surveillance de charge ----------
+async function loadCharge() {
+  try {
+    const m = await (await fetch("/monitoring")).json();
+    const x = m.mesures, s = x.seuils;
+    const elevee = m.niveau === "elevee";
+    $("etatCharge").className = `etat ${!m.surveillance ? "off" : elevee ? "elevee" : "normal"}`;
+    $("etatCharge").textContent = !m.surveillance ? "Désactivée" : elevee ? "⚠ Charge élevée" : "✓ Normale";
+    const jauge = (label, val, max, fmt) => `<div class="jauge"><div class="top"><span>${label}</span><span><b>${fmt(val)}</b> / seuil ${fmt(max)}</span></div>
+      <div class="track"><div class="fill${val > max ? " over" : ""}" style="width:${Math.min(100, (val / max) * 100)}%"></div></div></div>`;
+    const d = m.dernier_declenchement;
+    $("charge").innerHTML = `<div class="jauges">
+        ${jauge("Débit", x.rps, s.max_rps, (v) => v.toLocaleString("fr-FR", { maximumFractionDigits: 1 }) + " req/s")}
+        ${jauge("Latence p95", x.p95_ms, s.max_p95_ms, (v) => Math.round(v) + " ms")}
+      </div>
+      <dl class="kv">
+        <dt>Requêtes (${x.fenetre_s} s)</dt><dd>${nf.format(x.requetes)} <span class="muted" style="font-weight:400">· analyse à partir de ${s.min_requetes}</span></dd>
+        <dt>Déclenchement GitHub</dt><dd>${m.github.token ? "✓ actif · " + esc(m.github.repo) : "✗ inactif (GITHUB_TOKEN absent)"}</dd>
+        <dt>Délai entre 2 alertes</dt><dd>${s.repit_min} min</dd>
+      </dl>
+      <div class="trigger">${d
+        ? `<b>Dernier déclenchement : ${fmtDateHeure.format(new Date(d.date))}</b><span>${esc(d.raisons.join(" · "))}</span><span class="secondary">${d.resultat === "ok" ? "✓" : d.resultat === "echec" ? "✗" : "…"} ${esc(d.message ?? d.resultat)}</span>`
+        : '<span class="secondary">Aucun déclenchement depuis le démarrage du serveur.</span>'}</div>`;
+  } catch (e) {
+    $("charge").innerHTML = `<div class="muted">Monitoring indisponible (${esc(e.message)}).</div>`;
+  }
+}
+
 initFiltres();
 load();
+loadBarometre();
+loadCharge();
+setInterval(loadCharge, 5000);
+setInterval(loadBarometre, 60000);
 </script>
 </body>
 </html>

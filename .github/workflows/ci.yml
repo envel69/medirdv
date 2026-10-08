@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -8,6 +8,15 @@ on:
     - cron: "0 5 * * *" # tous les jours à 5 h UTC : détecte aussi les dérives sans nouveau commit
   workflow_dispatch:
     inputs:
+      declencheur:
+        description: "Origine du lancement"
+        type: choice
+        options: [manuel, charge]
+        default: manuel
+      details_charge:
+        description: "Mesures de charge (JSON, renseigné automatiquement par l'API quand la charge est trop haute)"
+        required: false
+        default: ""
       latence_simulee_ms:
         description: "Latence artificielle ajoutée à chaque requête de l'API (ex. 600) pour tester l'alerte de lenteur"
         required: false
@@ -15,11 +24,10 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: cicd-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Base MongoDB jetable créée dans le runner : aucun secret, aucun accès à Atlas
@@ -27,8 +35,27 @@ env:
   DB_NAME: doctolib_ci
   PORT: "3001"
   TZ: Europe/Paris
+  CHARGE_SURVEILLANCE: "off"
 
 jobs:
+  # ------------------------------------------------------------------ Alerte de charge
+  alerte-charge:
+    name: Alerte charge élevée
+    if: github.event_name == 'workflow_dispatch' && inputs.declencheur == 'charge'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ouvrir ou mettre à jour l'issue « charge »
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DETAILS_CHARGE: ${{ inputs.details_charge }}
+        run: bash scripts/charge-issue.sh
+
+  # ------------------------------------------------------------------ CI : tests
   tests:
     name: Tests de l'API
     runs-on: ubuntu-latest
@@ -52,7 +79,7 @@ jobs:
       - name: Démarrer l'API
         run: |
           nohup node server.js > api.log 2>&1 &
-          for i in $(seq 1 30); do curl -sf "localhost:$PORT/praticiens?limit=1" > /dev/null && exit 0; sleep 1; done
+          for i in $(seq 1 30); do curl -sf "localhost:$PORT/sante" > /dev/null && exit 0; sleep 1; done
           cat api.log; exit 1
       - name: Tests d'intégration
         run: npm test
@@ -60,11 +87,15 @@ jobs:
         if: failure()
         run: cat api.log
 
+  # ------------------------------------------------------------------ CI : tests de lenteur
   performance:
     name: Tests de lenteur (k6)
     needs: tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
     env:
       LATENCE_SIMULEE_MS: ${{ inputs.latence_simulee_ms || '0' }}
     services:
@@ -86,7 +117,7 @@ jobs:
       - name: Démarrer l'API
         run: |
           nohup node server.js > api.log 2>&1 &
-          for i in $(seq 1 30); do curl -sf "localhost:$PORT/praticiens?limit=1" > /dev/null && exit 0; sleep 1; done
+          for i in $(seq 1 30); do curl -sf "localhost:$PORT/sante" > /dev/null && exit 0; sleep 1; done
           cat api.log; exit 1
       - uses: grafana/setup-k6-action@v1
 
@@ -139,3 +170,106 @@ jobs:
         run: |
           echo "::error title=Lenteur détectée::$(paste -sd ', ' k6/seuils-depasses.txt)"
           exit 1
+
+  # ------------------------------------------------------------------ CD : livraison
+  livraison:
+    name: Livraison (image Docker → ghcr.io)
+    needs: [tests, performance]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    services:
+      mongo:
+        image: mongo:8.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nom de l'image
+        id: image
+        run: echo "nom=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Construire l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ${{ steps.image.outputs.nom }}:test
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Test de fumée de l'image
+        run: |
+          docker run -d --name api --network host \
+            -e MONGODB_URI=mongodb://localhost:27017 -e DB_NAME=doctolib_smoke -e CHARGE_SURVEILLANCE=off \
+            ${{ steps.image.outputs.nom }}:test
+          for i in $(seq 1 30); do curl -sf localhost:3001/sante > /dev/null && break; sleep 1; done
+          curl -sf localhost:3001/sante | tee /dev/stderr | grep -q '"statut":"ok"' || { docker logs api; exit 1; }
+          curl -sf localhost:3001/ | grep -q "MédiRDV" || { echo "page d'accueil absente"; exit 1; }
+
+      - name: Publier l'image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.nom }}:latest
+            ${{ steps.image.outputs.nom }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+
+      - name: Résumé
+        run: |
+          {
+            echo "## 🚀 Image publiée"
+            echo
+            echo '```bash'
+            echo "docker pull ${{ steps.image.outputs.nom }}:latest"
+            echo "docker run -p 3001:3001 -e MONGODB_URI=... ${{ steps.image.outputs.nom }}:latest"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ------------------------------------------------------------------ Baromètre W/L
+  barometre:
+    name: Baromètre W/L
+    needs: [tests, performance, livraison]
+    if: always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # publie le badge sur la branche « barometre »
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Calculer le baromètre
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTAT_COURANT: ${{ contains(needs.*.result, 'failure') && 'failure' || (contains(needs.*.result, 'cancelled') && 'cancelled' || 'success') }}
+        run: node scripts/barometre.mjs >> "$GITHUB_STEP_SUMMARY"
+      - name: Publier le badge (branche barometre)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/badge && cp barometre.json barometre-complet.json /tmp/badge/ && cd /tmp/badge
+          git init -q -b barometre
+          git add .
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -qm "Baromètre W/L (exécution ${GITHUB_RUN_NUMBER})"
+          git push -qf "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" barometre

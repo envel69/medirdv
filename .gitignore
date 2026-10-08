@@ -5,3 +5,6 @@ k6/rapport.html
 perf-report.md
 *.log
 k6/seuils-depasses.txt
+barometre.json
+barometre-complet.json
+issue-body.md
