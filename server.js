@@ -447,10 +447,12 @@ app.get("/monitoring", (req, res) => {
   res.json({ surveillance: CHARGE_SURVEILLANCE !== "off", github: { repo: GITHUB_REPO, token: Boolean(GITHUB_TOKEN) }, ...moniteur.etat() });
 });
 
-// Baromètre W/L des exécutions du pipeline sur main (mis en cache 60 s : l'API GitHub est limitée sans token)
+// Baromètre W/L des exécutions du pipeline sur main (mis en cache)
 const cacheBarometre = { data: null, le: 0 };
 app.get("/ci/barometre", route(async (req, res) => {
-  if (!cacheBarometre.data || Date.now() - cacheBarometre.le > 60000) {
+  // Sans token, l'API GitHub limite à 60 requêtes/heure : cache plus long
+  const ttl = GITHUB_TOKEN ? 60000 : 5 * 60000;
+  if (!cacheBarometre.data || Date.now() - cacheBarometre.le > ttl) {
     const runs = await chargerExecutions({ token: GITHUB_TOKEN, repo: GITHUB_REPO });
     cacheBarometre.data = { repo: GITHUB_REPO, ...calculerBarometre(runs) };
     cacheBarometre.le = Date.now();
