@@ -1,0 +1,22 @@
+{
+  "name": "doctolib-api",
+  "version": "1.0.0",
+  "description": "Clone simplifié de Doctolib : praticiens, patients, rendez-vous (MongoDB Atlas)",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "seed": "node --env-file-if-exists=.env seed.js",
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env --watch server.js",
+    "test": "node --test --test-reporter=spec \"tests/**/*.test.mjs\"",
+    "perf": "k6 run --summary-export k6/summary.json k6/load-test.js",
+    "perf:rapport": "node scripts/perf-report.mjs k6/summary.json"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mongodb": "^6.17.0"
+  },
+  "engines": {
+    "node": ">=22.9"
+  }
+}

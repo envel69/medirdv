@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * *" # tous les jours à 5 h UTC : détecte aussi les dérives sans nouveau commit
+  workflow_dispatch:
+    inputs:
+      latence_simulee_ms:
+        description: "Latence artificielle ajoutée à chaque requête de l'API (ex. 600) pour tester l'alerte de lenteur"
+        required: false
+        default: "0"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Base MongoDB jetable créée dans le runner : aucun secret, aucun accès à Atlas
+  MONGODB_URI: mongodb://localhost:27017
+  DB_NAME: doctolib_ci
+  PORT: "3001"
+  TZ: Europe/Paris
+
+jobs:
+  tests:
+    name: Tests de l'API
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      mongo:
+        image: mongo:8.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Générer le jeu de données
+        run: npm run seed
+      - name: Démarrer l'API
+        run: |
+          nohup node server.js > api.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf "localhost:$PORT/praticiens?limit=1" > /dev/null && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - name: Tests d'intégration
+        run: npm test
+      - name: Logs de l'API
+        if: failure()
+        run: cat api.log
+
+  performance:
+    name: Tests de lenteur (k6)
+    needs: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      LATENCE_SIMULEE_MS: ${{ inputs.latence_simulee_ms || '0' }}
+    services:
+      mongo:
+        image: mongo:8.0
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Générer le jeu de données
+        run: npm run seed
+      - name: Démarrer l'API
+        run: |
+          nohup node server.js > api.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf "localhost:$PORT/praticiens?limit=1" > /dev/null && exit 0; sleep 1; done
+          cat api.log; exit 1
+      - uses: grafana/setup-k6-action@v1
+
+      - name: Test de charge k6
+        id: k6
+        env:
+          K6_WEB_DASHBOARD: "true"
+          K6_WEB_DASHBOARD_EXPORT: k6/rapport.html
+          K6_NO_COLOR: "true"
+        run: |
+          set +e
+          k6 run --quiet --summary-export k6/summary.json k6/load-test.js
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 99 = seuils de performance dépassés (lenteur) ; autre code non nul = erreur du script
+          if [ "$code" -ne 0 ] && [ "$code" -ne 99 ]; then exit "$code"; fi
+
+      - name: Rapport de performance
+        if: always() && hashFiles('k6/summary.json') != ''
+        run: node scripts/perf-report.mjs k6/summary.json perf-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Artefacts (rapport k6 HTML + résumé JSON)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapport-k6
+          path: |
+            k6/rapport.html
+            k6/summary.json
+            api.log
+          if-no-files-found: ignore
+
+      # Les issues ne sont gérées que pour la branche principale (pas pour les pull requests)
+      - name: Ouvrir ou mettre à jour l'issue de lenteur
+        if: steps.k6.outputs.code == '99' && github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/perf-issue.sh ouvrir
+
+      - name: Fermer l'issue de lenteur si les seuils sont respectés
+        if: steps.k6.outputs.code == '0' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: bash scripts/perf-issue.sh fermer
+
+      - name: Échouer si lenteur détectée
+        if: steps.k6.outputs.code == '99'
+        run: |
+          echo "::error title=Lenteur détectée::$(paste -sd ', ' k6/seuils-depasses.txt)"
+          exit 1

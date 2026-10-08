@@ -1,0 +1,7 @@
+node_modules
+.env
+k6/summary.json
+k6/rapport.html
+perf-report.md
+*.log
+k6/seuils-depasses.txt
